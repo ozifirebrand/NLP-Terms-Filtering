@@ -447,7 +447,7 @@ def extract_keywords_api():
         return jsonify({"error": "No URLs provided"}), 400
     
     # Step 1: Download NLTK resources
-    # download_nltk_resources()
+    download_nltk_resources()
     
     # Step 2: Scrape competitor contents
     competitor_texts, site_names = scrape_competitors(urls)
@@ -518,5 +518,5 @@ def extract_keywords_api():
     return jsonify(response)
 
 if __name__ == '__main__':
-    download_nltk_resources()
+    # download_nltk_resources()
     app.run(debug=True)
