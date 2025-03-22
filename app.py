@@ -518,5 +518,5 @@ def extract_keywords_api():
     return jsonify(response)
 
 if __name__ == '__main__':
-    # download_nltk_resources()
+    download_nltk_resources()
     app.run(debug=True)
