@@ -1,18 +1,20 @@
 from flask import Flask, request, jsonify
 import logging
 from collections import defaultdict
+
+app = Flask(__name__)
+
 import requests
 from bs4 import BeautifulSoup
 import nltk
 import re
+from collections import defaultdict
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 import spacy
+import logging
 from bs4.element import Tag
 import math
-from langdetect import detect
-
-app = Flask(__name__)
 
 # Install and import the contractions library
 try:
@@ -25,6 +27,15 @@ except ImportError:
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# Initialize spaCy's English model for NER and POS tagging
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    logging.info("Downloading 'en_core_web_sm' model for spaCy as it was not found.")
+    from spacy.cli import download
+    download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
 # Define essential stopwords to retain within phrases (if any)
 ESSENTIAL_STOPWORDS = set()
@@ -58,31 +69,6 @@ def download_nltk_resources():
             logging.info(f"Downloading NLTK resource: {resource}")
             nltk.download(resource)
 
-def get_stopwords(user_language):
-    try:
-        stopwords_list = stopwords.words(user_language)
-    except OSError:
-        nltk.download('stopwords')
-        stopwords_list = stopwords.words(user_language)
-    return set(stopwords_list)
-
-def load_spacy_model(user_language):
-    language_models = {
-        'en': 'en_core_web_sm',
-        'fr': 'fr_core_news_sm',
-        'es': 'es_core_news_sm',
-        # Add other languages as needed
-    }
-    model_name = language_models.get(user_language, 'en_core_web_sm')
-    try:
-        nlp = spacy.load(model_name)
-    except OSError:
-        logging.info(f"Downloading '{model_name}' model for spaCy as it was not found.")
-        from spacy.cli import download
-        download(model_name)
-        nlp = spacy.load(model_name)
-    return nlp
-
 def is_cookie_banner(tag):
     if not isinstance(tag, Tag) or tag.attrs is None:
         return False
@@ -109,7 +95,7 @@ def is_review_section(tag):
                     return True
     return False
 
-def scrape_website(url, user_language):
+def scrape_website(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers, timeout=10)
@@ -140,13 +126,13 @@ def scrape_website(url, user_language):
         logging.error(f"Error scraping {url}: {e}")
         return '', ''
 
-def scrape_competitors(urls, user_language):
+def scrape_competitors(urls):
     all_text = []
     site_names = set()
     failed_urls = []
     for url in urls:
         print(f"Scraping: {url}")
-        content, site_name = scrape_website(url, user_language)
+        content, site_name = scrape_website(url)
         if content:
             all_text.append(content)
         else:
@@ -159,7 +145,7 @@ def scrape_competitors(urls, user_language):
             print(f"- {url}")
     return all_text, site_names
 
-def preprocess_text(text, nlp):
+def preprocess_text(text):
     # Normalize apostrophes and quotation marks
     text = text.replace("’", "'")  # Replace Unicode apostrophes with ASCII apostrophe
     text = text.replace("‘", "'")
@@ -218,7 +204,7 @@ def compute_total_counts(keywords, documents):
         }
     return keyword_counts
 
-def is_relevant(term, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default, stopwords_set):
+def is_relevant(term, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default):
     term_lower = term.lower()
 
     # Always include seed keyword and its variations
@@ -239,7 +225,7 @@ def is_relevant(term, counts_info, site_names, site_name_phrases, seed_variation
         'might', 'must', 'could', 'would', 'should', 'do', 'does', 'did', 'done', 'doing',
         'll', 're', 've', 's', 'd', 'm', 't', 'cookie', 'cookies', 'consent', 'settings', 'privacy'
     ])
-    boundary_stopwords = stopwords_set.union(additional_boundary_stopwords)
+    boundary_stopwords = set(stopwords.words('english')).union(additional_boundary_stopwords)
     boundary_stopwords = boundary_stopwords - ESSENTIAL_STOPWORDS
     boundary_stopwords = {word.lower() for word in boundary_stopwords}
 
@@ -440,11 +426,11 @@ def deduplicate_terms(filtered_keywords, seed_variations, seed_keyword, final_li
 
     return final_keywords
 
-def filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default, stopwords_set):
+def filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default):
     filtered_keywords = []
     for term, score in tfidf_keywords:
         stripped_term = is_relevant(
-            term, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default, stopwords_set
+            term, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, ngram_inclusion_limits_default
         )
         if stripped_term:
             filtered_keywords.append((stripped_term, score))
@@ -455,39 +441,32 @@ def filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, 
 def extract_keywords_api():
     data = request.json
     urls = data.get("urls", [])
-    seed_keyword = data.get("seed_keyword", "spouse visa uk")
+    seed_keyword = data.get("seed_keyword", "")
     
     if not urls:
-        return jsonify({"error": "No URLs provided"}), 400
+        return jsonify({"error": "URLs: not found"}), 400
+    if not seed_keyword:
+        return jsonify({"error":"seed keyword: not found"}), 400
     
-    # Step 1: Detect language of the first URL
-    user_language = detect(urls[0])
-    
-    # Step 2: Load stopwords for the detected language
-    stopwords_set = get_stopwords(user_language)
-    
-    # Step 3: Load the appropriate SpaCy model
-    nlp = load_spacy_model(user_language)
-    
-    # Step 4: Download NLTK resources
+    # Step 1: Download NLTK resources
     download_nltk_resources()
     
-    # Step 5: Scrape competitor contents
-    competitor_texts, site_names = scrape_competitors(urls, user_language)
+    # Step 2: Scrape competitor contents
+    competitor_texts, site_names = scrape_competitors(urls)
     if not competitor_texts:
         return jsonify({"error": "No content scraped from provided URLs"}), 400
     
-    # Step 6: Preprocess each competitor's text
-    lemmatized_texts = [preprocess_text(text, nlp) for text in competitor_texts]
+    # Step 3: Preprocess each competitor's text
+    lemmatized_texts = [preprocess_text(text) for text in competitor_texts]
     
-    # Step 7: Extract keywords using TF-IDF
+    # Step 4: Extract keywords using TF-IDF
     tfidf_keywords, vectorizer = extract_keywords_tfidf(lemmatized_texts, max_features=5000)
     
-    # Step 8: Compute total counts for all potential keywords
+    # Step 5: Compute total counts for all potential keywords
     potential_keywords = [term for term, score in tfidf_keywords]
     counts_info = compute_total_counts(potential_keywords, lemmatized_texts)
     
-    # Step 9: Rank terms within their n-gram groups
+    # Step 6: Rank terms within their n-gram groups
     ngram_groups = defaultdict(list)
     for term, score in tfidf_keywords:
         num_words = len(term.split())
@@ -498,45 +477,46 @@ def extract_keywords_api():
         for rank, (term_lower, score) in enumerate(terms_sorted, start=1):
             counts_info[term_lower]['ngram_rank'] = rank
     
-    # Step 10: Generate site name sequential phrases
+    # Step 7: Generate site name sequential phrases
     site_name_phrases = {" ".join(site_name.split()[i:i+2]).lower() for site_name in site_names for i in range(len(site_name.split()) - 1)}
     
-    # Step 11: Generate seed keyword variations
+    # Step 8: Generate seed keyword variations
     seed_variations = generate_seed_variations(seed_keyword)
     
-    # Step 12: Define inclusion limits based on n-gram length
+    # Step 9: Define inclusion limits based on n-gram length
     ngram_inclusion_limits = {1: 50, 2: 150, 3: 150, 4: 150}
     
-    # Step 13: Filter keywords based on relevancy
-    filtered_keywords = filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, 50, stopwords_set)
+    # Step 10: Filter keywords based on relevancy
+    filtered_keywords = filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, seed_variations, ngram_inclusion_limits, 50)
     
-    # Step 14: Ensure seed keyword and its variations are included
+    # Step 11: Ensure seed keyword and its variations are included
     for variation in seed_variations:
         if variation not in [term.lower() for term, _ in filtered_keywords]:
             score = next((score for term, score in tfidf_keywords if term.lower() == variation), 0)
             if score > 0:
                 filtered_keywords.append((variation, score))
     
-    # Step 15: Limit multi-word phrases (3+ words) to top N
+    # Step 12: Limit multi-word phrases (3+ words) to top N
     multi_word_phrases_sorted = sorted([item for item in filtered_keywords if len(item[0].split()) >= 3], key=lambda x: -x[1])[:150]
     filtered_keywords = [item for item in filtered_keywords if len(item[0].split()) < 3] + multi_word_phrases_sorted
     
-    # Step 16: Deduplicate terms
+    # Step 13: Deduplicate terms
     final_keywords = deduplicate_terms(filtered_keywords, seed_variations, seed_keyword, 100)
     
-    # Step 17: Prepare response format
+    # Step 14: Prepare response format
     keyword_counts_display = {term.lower(): f"{counts_info.get(term.lower(), {}).get('avg', 0)}-{counts_info.get(term.lower(), {}).get('range', 0)}" for term, _ in final_keywords}
     
-    seed_phrase = seed_keyword
-    variations = [term for term, _ in final_keywords if term.lower() in seed_variations and term.lower() != seed_keyword.lower()]
-    other_keywords = [(term, score) for term, score in final_keywords if term.lower() not in seed_variations and term.lower() != seed_keyword.lower()]
+    # Combine all keywords into a single list
+    all_keywords = [
+        {"term": term, "score": score, "suggested_count": keyword_counts_display.get(term.lower(), '0-0')}
+        for term, score in final_keywords
+    ]
     
-    response = {
-        "main_keyword": [
-            {"term": seed_phrase, "score": next((s for t, s in final_keywords if t.lower() == seed_phrase.lower()), 0), "count_display": keyword_counts_display.get(seed_phrase, '0-0')}
-        ] + [{"term": term, "score": next((s for t, s in final_keywords if t == term), 0), "count_display": keyword_counts_display.get(term, '0-0')} for term in variations],
-        "other_keywords": [{"term": term, "score": score, "count_display": keyword_counts_display.get(term, '0-0')} for term, score in sorted(other_keywords, key=lambda x: -x[1])]
-    }
+    # Sort the combined list by score in descending order
+    all_keywords_sorted = sorted(all_keywords, key=lambda x: -x["score"])
+    
+    # Return the single list in the response
+    response = {"keywords": all_keywords_sorted}
     
     return jsonify(response)
 

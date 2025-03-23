@@ -5,3 +5,4 @@ scikit-learn>=1.0.0
 spacy>=3.0.0
 flask
 gunicorn
+langdetect
