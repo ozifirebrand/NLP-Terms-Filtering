@@ -6,3 +6,5 @@ spacy>=3.0.0
 flask
 gunicorn
 langdetect
+numpy
+sentence-transformers

@@ -8,13 +8,18 @@ import requests
 from bs4 import BeautifulSoup
 import nltk
 import re
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 import spacy
 import logging
 from bs4.element import Tag
 import math
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import AgglomerativeClustering
+import warnings
 
 # Install and import the contractions library
 try:
@@ -519,6 +524,77 @@ def extract_keywords_api():
     response = {"keywords": all_keywords_sorted}
     
     return jsonify(response)
+
+# Load the pre-trained sentence transformer model
+sentence_model = SentenceTransformer('all-mpnet-base-v2')
+
+
+@app.route('/cluster', methods=['POST'])
+def cluster_headings():
+    try:
+        warnings.filterwarnings('ignore')
+
+        # Parse request JSON
+        data = request.get_json()
+        headings = data.get("headings", [])
+        distance_threshold = data.get("distance_threshold", 0.36)
+
+        if not headings:
+            return jsonify({"error": "Headings list cannot be empty"}), 400
+
+        # Generate embeddings
+        embeddings = sentence_model.encode(headings)
+
+        # Compute the cosine similarity matrix
+        similarity_matrix = cosine_similarity(embeddings)
+
+        # Convert similarity to distance (distance = 1 - similarity)
+        distance_matrix = 1 - similarity_matrix
+
+        # Perform clustering
+        clustering = AgglomerativeClustering(
+            metric='precomputed',
+            linkage='average',
+            distance_threshold=distance_threshold,
+            n_clusters=None
+        )
+
+        labels = clustering.fit_predict(distance_matrix)
+
+        # Group headings into clusters
+        clusters = {}
+        for idx, label in enumerate(labels):
+            clusters.setdefault(label, []).append(headings[idx])
+
+        # Select representative headings
+        representative_headings = {}
+        for label, cluster_headings in clusters.items():
+            if len(cluster_headings) == 1:
+                representative = cluster_headings[0]
+            else:
+                indices = [headings.index(h) for h in cluster_headings]
+                cluster_distances = distance_matrix[np.ix_(indices, indices)]
+                avg_distances = cluster_distances.mean(axis=1)
+                representative = cluster_headings[np.argmin(avg_distances)]
+            representative_headings[label] = representative
+
+        # Maintain order of first occurrence
+        ordered_representatives = OrderedDict()
+        for idx, heading in enumerate(headings):
+            label = labels[idx]
+            representative = representative_headings[label]
+            if representative not in ordered_representatives:
+                ordered_representatives[representative] = None
+
+        return jsonify({"representative_headings": list(ordered_representatives.keys())})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/')
+def home():
+    return "Konvart helper app is up"
 
 if __name__ == '__main__':
     app.run(debug=True)
