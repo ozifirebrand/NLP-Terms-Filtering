@@ -1,10 +1,20 @@
+numpy
+scikit-learn
+sentence-transformers
+Flask
+gunicorn
 requests>=2.26.0
 beautifulsoup4>=4.10.0
 nltk>=3.6.0
 scikit-learn>=1.0.0
 spacy>=3.0.0
-flask
-gunicorn
-langdetect
-numpy
-sentence-transformers
+flask>=2.0.0
+gunicorn>=20.0.0
+langdetect>=1.0.0
+numpy>=1.20.0
+sentence-transformers>=2.2.0
+rake-nltk>=1.0.0
+gensim>=4.0.0
+pinecone-client>=2.0.0
+python-dotenv>=0.19.0
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.0.0/en_core_web_sm-3.0.0.tar.gz

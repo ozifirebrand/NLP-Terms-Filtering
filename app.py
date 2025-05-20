@@ -1,18 +1,13 @@
 from flask import Flask, request, jsonify
 import logging
-from collections import defaultdict
-
-app = Flask(__name__)
-
+from collections import defaultdict, OrderedDict
 import requests
 from bs4 import BeautifulSoup
 import nltk
 import re
-from collections import defaultdict, OrderedDict
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 import spacy
-import logging
 from bs4.element import Tag
 import math
 import numpy as np
@@ -20,6 +15,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import AgglomerativeClustering
 import warnings
+from typing import List, Dict, Any, Optional
+from rake_nltk import Rake
+from gensim import corpora, models
+# import pinecone
+from enum import Enum
+
+app = Flask(__name__)
 
 # Install and import the contractions library
 try:
@@ -42,6 +44,14 @@ except OSError:
     download("en_core_web_sm")
     nlp = spacy.load("en_core_web_sm")
 
+# Initialize NLP models
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+rake = Rake()
+
+# Initialize Pinecone (or Weaviate)
+# pinecone.init(api_key="YOUR_API_KEY", environment="YOUR_ENV")
+# index = pinecone.Index("document-embeddings")
+
 # Define essential stopwords to retain within phrases (if any)
 ESSENTIAL_STOPWORDS = set()
 
@@ -61,6 +71,10 @@ REVIEW_IDENTIFIERS = [
     re.compile(r'.*\bfeedback\b.*', re.IGNORECASE),
     re.compile(r'.*\bratings\b.*', re.IGNORECASE)
 ]
+
+# class VectorDBType(str, Enum):
+#     PINECONE = "pinecone"
+#     WEAVIATE = "weaviate"
 
 def download_nltk_resources():
     resources = ['punkt', 'wordnet', 'omw-1.4', 'stopwords']
@@ -441,6 +455,54 @@ def filter_keywords(tfidf_keywords, counts_info, site_names, site_name_phrases, 
             filtered_keywords.append((stripped_term, score))
     return filtered_keywords
 
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size - overlap):
+        chunk = ' '.join(words[i:i + chunk_size])
+        chunks.append(chunk)
+    return chunks
+
+def extract_keywords_rake(text: str) -> List[str]:
+    rake.extract_keywords_from_text(text)
+    return rake.get_ranked_phrases()[:5]
+
+def extract_topics(texts: List[str], num_topics: int = 3) -> List[str]:
+    tokenized = [[word for word in doc.lower().split()] for doc in texts]
+    dictionary = corpora.Dictionary(tokenized)
+    corpus = [dictionary.doc2bow(text) for text in tokenized]
+
+    lda = models.LdaModel(corpus, num_topics=num_topics, id2word=dictionary)
+
+    topics = []
+    for topic in lda.print_topics():
+        topics.append(topic[1])
+    return topics
+
+def extract_structural_metadata(text: str) -> Dict[str, Any]:
+    doc = nlp(text)
+    sentences = [sent.text for sent in doc.sents]
+    nouns = [chunk.text for chunk in doc.noun_chunks]
+    return {
+        "sentences": sentences[:5],
+        "nouns": nouns[:10],
+    }
+
+# def store_in_pinecone(chunks: List[Dict[str, Any]]):
+    # vectors = []
+    # for i, chunk in enumerate(chunks):
+    #     vectors.append({
+    #         "id": f"{chunk['user_id']}_{chunk['doc_name']}_{i}",
+    #         "values": chunk['embeddings'],
+    #         "metadata": {
+    #             **chunk['metadata'],
+    #             "doc_name": chunk['doc_name'],
+    #             "user_id": chunk['user_id'],
+    #             "text": chunk['text']
+    #         }
+    #     })
+
+    # index.upsert(vectors=vectors, namespace=f"user_{chunks[0]['user_id']}")
 
 @app.route('/extract_keywords', methods=['POST'])
 def extract_keywords_api():
@@ -508,27 +570,54 @@ def extract_keywords_api():
     # Step 13: Deduplicate terms
     final_keywords = deduplicate_terms(filtered_keywords, seed_variations, seed_keyword, 100)
     
-    # Step 14: Prepare response format
-    keyword_counts_display = {term.lower(): f"{counts_info.get(term.lower(), {}).get('avg', 0)}-{counts_info.get(term.lower(), {}).get('range', 0)}" for term, _ in final_keywords}
+    # Step 14: Prepare response format with categorization
+    keyword_counts_display = {
+        term.lower(): f"{min(counts_info.get(term.lower(), {}).get('avg', 0), counts_info.get(term.lower(), {}).get('range', 0))}-{max(counts_info.get(term.lower(), {}).get('avg', 0), counts_info.get(term.lower(), {}).get('range', 0))}" 
+        for term, _ in final_keywords
+    }
     
-    # Combine all keywords into a single list
-    all_keywords = [
-        {"term": term, "score": score, "suggested_count": keyword_counts_display.get(term.lower(), '0-0')}
-        for term, score in final_keywords
-    ]
+    # Categorize keywords by TF-IDF score as per requirements
+    main_keyword = {
+        "term": seed_keyword, 
+        "score": round(next((score for term, score in final_keywords if term.lower() == seed_keyword.lower()), 0), 2)
+    }
     
-    # Sort the combined list by score in descending order
-    all_keywords_sorted = sorted(all_keywords, key=lambda x: -x["score"])
+    top_terms = []
+    medium_terms = []
+    low_terms = []
     
-    # Return the single list in the response
-    response = {"keywords": all_keywords_sorted}
+    for term, score in final_keywords:
+        if term.lower() == seed_keyword.lower():
+            continue  # Skip the main keyword as it's already included
+        
+        keyword_info = {
+            "term": term, 
+            "score": round(score, 2),
+            "suggested_count": keyword_counts_display.get(term.lower(), '0-0')
+        }
+        
+        if score > 0.15:
+            top_terms.append(keyword_info)
+        elif 0.05 <= score <= 0.15:
+            medium_terms.append(keyword_info)
+        else:  # score < 0.05
+            low_terms.append(keyword_info)
+    
+    # Limit top terms to 3 as per requirements
+    top_terms = sorted(top_terms, key=lambda x: -x["score"])[:3]
+    medium_terms = sorted(medium_terms, key=lambda x: -x["score"])
+    low_terms = sorted(low_terms, key=lambda x: -x["score"])
+    
+    # Return categorized keywords in the response
+    response = {
+        "main_keyword": main_keyword,
+        "top_terms": top_terms,
+        "medium_terms": medium_terms,
+        "low_terms": low_terms
+    }
     
     return jsonify(response)
-
-# Load the pre-trained sentence transformer model
-sentence_model = SentenceTransformer('all-mpnet-base-v2')
-
-
+    
 @app.route('/cluster', methods=['POST'])
 def cluster_headings():
     try:
@@ -543,7 +632,7 @@ def cluster_headings():
             return jsonify({"error": "Headings list cannot be empty"}), 400
 
         # Generate embeddings
-        embeddings = sentence_model.encode(headings)
+        embeddings = embedding_model.encode(headings)
 
         # Compute the cosine similarity matrix
         similarity_matrix = cosine_similarity(embeddings)
@@ -591,6 +680,96 @@ def cluster_headings():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# @app.route('/process_documents', methods=['POST'])
+# def process_documents():
+#     try:
+#         data = request.get_json()
+#         texts = data.get("texts", [])
+#         doc_names = data.get("doc_names", [])
+#         user_id = data.get("user_id", "")
+#         chunk_size = data.get("chunk_size", 512)
+#         overlap = data.get("overlap", 50)
+#         vector_db = data.get("vector_db", "pinecone")
+
+#         if len(texts) != len(doc_names):
+#             return jsonify({"error": "Number of texts and doc_names must match"}), 400
+
+#         processed_chunks = []
+
+#         for text, doc_name in zip(texts, doc_names):
+#             chunks = chunk_text(text, chunk_size, overlap)
+
+#             doc_keywords = extract_keywords_rake(text)
+#             doc_topics = extract_topics([text])
+#             doc_structure = extract_structural_metadata(text)
+
+#             for chunk in chunks:
+#                 embeddings = embedding_model.encode(chunk).tolist()
+#                 chunk_keywords = extract_keywords_rake(chunk)
+
+#                 metadata = {
+#                     "keywords": list(set(doc_keywords + chunk_keywords)),
+#                     "topics": doc_topics,
+#                     "structure": doc_structure,
+#                     "chunk_length": len(chunk),
+#                 }
+
+#                 processed_chunks.append({
+#                     "text": chunk,
+#                     "embeddings": embeddings,
+#                     "metadata": metadata,
+#                     "doc_name": doc_name,
+#                     "user_id": user_id
+#                 })
+
+#         # Store in vector database
+#         if vector_db == VectorDBType.PINECONE:
+#             store_in_pinecone(processed_chunks)
+
+#         return jsonify({
+#             "status": "success",
+#             "num_chunks": len(processed_chunks),
+#             "user_id": user_id,
+#             "vector_db": vector_db
+#         })
+
+#     except Exception as e:
+#         return jsonify({"error": str(e)}), 500
+
+# @app.route('/query_documents', methods=['GET'])
+# def query_documents():
+    # try:
+    #     user_id = request.args.get("user_id", "")
+    #     query_text = request.args.get("query_text", "")
+    #     vector_db = request.args.get("vector_db", "pinecone")
+    #     top_k = int(request.args.get("top_k", 5))
+    #     doc_name = request.args.get("doc_name", None)
+
+    #     if not query_text:
+    #         return jsonify({"error": "query_text cannot be empty"}), 400
+
+    #     # Generate query embedding
+    #     query_embedding = embedding_model.encode(query_text).tolist()
+
+    #     if vector_db == VectorDBType.PINECONE:
+    #         # Query Pinecone with metadata filter
+    #         filter = {"user_id": user_id}
+    #         if doc_name:
+    #             filter["doc_name"] = doc_name
+
+    #         results = index.query(
+    #             vector=query_embedding,
+    #             namespace=f"user_{user_id}",
+    #             top_k=top_k,
+    #             include_metadata=True,
+    #             filter=filter
+    #         )
+    #         return jsonify([match["metadata"] for match in results["matches"]])
+    #     else:
+    #         return jsonify({"error": "Weaviate not implemented yet"}), 400
+
+    # except Exception as e:
+    #     return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def home():
